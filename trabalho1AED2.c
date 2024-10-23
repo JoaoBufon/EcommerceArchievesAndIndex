@@ -19,6 +19,7 @@ typedef struct {
     char category_code[N];
     char brand[N];
     float price;
+    bool deleted;
 } DadoProduto;
 
 typedef struct {
@@ -27,6 +28,7 @@ typedef struct {
     char user_session[N];
     char event_time[25];
     char event_type[20];
+    bool deleted;
 } DadoAcesso;
 
 typedef struct {
@@ -53,22 +55,214 @@ void criarIndiceProduto();
 long buscarNoIndiceProduto(int product_id);
 void printDadosProdutosComIndice(int product_id);
 
+void insertAcesso(DadoAcesso *newAcesso) {
+    FILE *fDadosAcessos = fopen(dadosAcesso, "ab+");
+    if (fDadosAcessos == NULL) {
+        printf("Erro ao abrir o arquivo de acessos.\n");
+        return;
+    }
+
+    newAcesso->incremental_key = getNextIncrementalKey();
+    newAcesso->deleted = false;
+    fwrite(newAcesso, sizeof(DadoAcesso), 1, fDadosAcessos);
+
+    fclose(fDadosAcessos);
+    printf("Novo acesso inserido com sucesso. Incremental Key: %d\n", newAcesso->incremental_key);
+}
+void deleteAcesso(int incremental_key) {
+    FILE *fDadosAcessos = fopen(dadosAcesso, "rb+");
+    if (fDadosAcessos == NULL) {
+        printf("Erro ao abrir o arquivo de acessos.\n");
+        return;
+    }
+
+    DadoAcesso acesso;
+    bool found = false;
+
+    while (fread(&acesso, sizeof(DadoAcesso), 1, fDadosAcessos)) {
+        if (acesso.incremental_key == incremental_key && !acesso.deleted) {
+            acesso.deleted = true;
+            fseek(fDadosAcessos, -sizeof(DadoAcesso), SEEK_CUR);
+            fwrite(&acesso, sizeof(DadoAcesso), 1, fDadosAcessos);
+            found = true;
+            printf("Acesso ID %d removido logicamente.\n", incremental_key);
+            break;
+        }
+    }
+
+    if (!found) {
+        printf("Acesso ID %d não encontrado.\n", incremental_key);
+    }
+
+    fclose(fDadosAcessos);
+}
+
+void reorganizeAcessoFile() {
+    FILE *fDadosAcessos = fopen(dadosAcesso, "rb");
+    FILE *tempFile = fopen("temp_acesso.bin", "wb");
+
+    if (!fDadosAcessos || !tempFile) {
+        printf("Erro ao abrir os arquivos durante a reorganização.\n");
+        return;
+    }
+
+    DadoAcesso acesso;
+
+    while (fread(&acesso, sizeof(DadoAcesso), 1, fDadosAcessos)) {
+        if (!acesso.deleted) {
+            fwrite(&acesso, sizeof(DadoAcesso), 1, tempFile);
+        }
+    }
+
+    fclose(fDadosAcessos);
+    fclose(tempFile);
+
+    remove(dadosAcesso);
+    rename("temp_acesso.bin", dadosAcesso);
+
+    printf("Reorganização completa. Registros excluídos removidos.\n");
+}
+
+void insertProductWithExtension(DadoProduto *newProduct) {
+    FILE *fDadosProdutos = fopen(dadosProdutos, "rb+");
+   // FILE *fExtensionArea = fopen("extension.bin", "ab+");
+
+    if (!fDadosProdutos /*|| !fExtensionArea*/) {
+        printf("Erro ao abrir os arquivos de produtos ou extensao.\n");
+        return;
+    }
+
+    DadoProduto currentProduct;
+    bool inserted = false;
+
+    FILE *tempFile = fopen("temp.bin", "wb");
+    if (!tempFile) {
+        printf("Erro ao abrir o arquivo temporario.\n");
+        fclose(fDadosProdutos);
+        return;
+    }
+
+    fseek(fDadosProdutos, 0, SEEK_SET);
+    while (fread(&currentProduct, sizeof(DadoProduto), 1, fDadosProdutos)) {
+        if (currentProduct.deleted) {
+            continue;
+        }
+
+        if (!inserted && newProduct->product_id < currentProduct.product_id) {
+            fwrite(newProduct, sizeof(DadoProduto), 1, tempFile);
+            inserted = true;
+        }
+
+        fwrite(&currentProduct, sizeof(DadoProduto), 1, tempFile);
+    }
+
+    if (!inserted) {
+        fwrite(newProduct, sizeof(DadoProduto), 1, tempFile);
+    }
+
+    fclose(fDadosProdutos);
+    //fclose(fExtensionArea);
+    fclose(tempFile);
+
+    remove(dadosProdutos);
+    rename("temp.bin", dadosProdutos);
+
+    printf("Produto ID %d inserido no arquivo de produtos ordenado.\n", newProduct->product_id);
+}
+
+
+void removeProduct(int product_id) {
+    FILE *fDadosProdutos = fopen(dadosProdutos, "rb+");
+
+    if (!fDadosProdutos) {
+        printf("Erro ao abrir o arquivo de produtos.\n");
+        return;
+    }
+
+    DadoProduto currentProduct;
+    bool found = false;
+
+    while (fread(&currentProduct, sizeof(DadoProduto), 1, fDadosProdutos)) {
+        if (currentProduct.product_id == product_id && !currentProduct.deleted) {
+            currentProduct.deleted = true;
+
+            fseek(fDadosProdutos, -sizeof(DadoProduto), SEEK_CUR);
+            fwrite(&currentProduct, sizeof(DadoProduto), 1, fDadosProdutos);
+            found = true;
+            printf("Produto ID %d removido logicamente.\n", product_id);
+            break;
+        }
+    }
+
+    if (!found) {
+        printf("Produto ID %d nao encontrado.\n", product_id);
+    }
+
+    fclose(fDadosProdutos);
+}
+
+void reorganizeFile() {
+    FILE *fDadosProdutos = fopen(dadosProdutos, "rb");
+    FILE *fExtensionArea = fopen("extension.bin", "rb");
+    FILE *tempFile = fopen("temp.bin", "wb");
+
+    if (!fDadosProdutos || !tempFile) {
+        printf("Erro ao abrir os arquivos durante a reorganizacao.\n");
+        return;
+    }
+
+    DadoProduto productFromMain, productFromExtension;
+    bool mainEmpty = !fread(&productFromMain, sizeof(DadoProduto), 1, fDadosProdutos);
+    bool extensionEmpty = true;
+
+    if (fExtensionArea) {
+        extensionEmpty = !fread(&productFromExtension, sizeof(DadoProduto), 1, fExtensionArea);
+    }
+
+    while (!mainEmpty || !extensionEmpty) {
+        if (!mainEmpty && productFromMain.deleted) {
+            mainEmpty = !fread(&productFromMain, sizeof(DadoProduto), 1, fDadosProdutos);
+            continue;
+        }
+
+        if (extensionEmpty || (!mainEmpty && productFromMain.product_id < productFromExtension.product_id)) {
+            fwrite(&productFromMain, sizeof(DadoProduto), 1, tempFile);
+            mainEmpty = !fread(&productFromMain, sizeof(DadoProduto), 1, fDadosProdutos);
+        } else {
+            fwrite(&productFromExtension, sizeof(DadoProduto), 1, tempFile);
+            extensionEmpty = !fread(&productFromExtension, sizeof(DadoProduto), 1, fExtensionArea);
+        }
+    }
+
+    fclose(fDadosProdutos);
+    if (fExtensionArea) fclose(fExtensionArea);
+    fclose(tempFile);
+
+    remove(dadosProdutos);
+    rename("temp.bin", dadosProdutos);
+
+    if (fExtensionArea) {
+        remove("extension.bin");
+    }
+
+    printf("Reorganizacao completa com produtos ordenados por ID.\n");
+}
+
+
 long buscarNoIndiceAcesso(int incremental_key) {
     FILE *fIndiceAcessos = fopen(indiceAcesso, "rb");
     if (fIndiceAcessos == NULL) {
-        printf("Erro ao abrir o arquivo de índice de acessos.\n");
+        printf("Erro ao abrir o arquivo de indice de acessos.\n");
         return -1;
     }
 
     IndiceAcesso indice;
     int left = 0, right = 0;
 
-    // Find out how many records are in the index file
     fseek(fIndiceAcessos, 0, SEEK_END);
     right = ftell(fIndiceAcessos) / sizeof(IndiceAcesso);
     rewind(fIndiceAcessos);
 
-    // Binary search for the closest record in the index
     while (left <= right) {
         int mid = (left + right) / 2;
         fseek(fIndiceAcessos, mid * sizeof(IndiceAcesso), SEEK_SET);
@@ -76,7 +270,7 @@ long buscarNoIndiceAcesso(int incremental_key) {
 
         if (indice.incremental_key == incremental_key) {
             fclose(fIndiceAcessos);
-            return indice.file_position;  // Exact match
+            return indice.file_position;
         } else if (indice.incremental_key < incremental_key) {
             left = mid + 1;
         } else {
@@ -84,10 +278,9 @@ long buscarNoIndiceAcesso(int incremental_key) {
         }
     }
 
-    // If exact match not found, return the nearest lower position
     if (right < 0) {
         fclose(fIndiceAcessos);
-        return 0;  // Start from the beginning if nothing is found
+        return 0;
     }
 
     fseek(fIndiceAcessos, right * sizeof(IndiceAcesso), SEEK_SET);
@@ -103,11 +296,10 @@ void buscarAcesso(int incremental_key) {
         return;
     }
 
-    // Find the nearest index in the indiceAcesso file
     long pos = buscarNoIndiceAcesso(incremental_key);
 
     if (pos == -1) {
-        printf("Acesso não encontrado.\n");
+        printf("Acesso nao encontrado.\n");
         fclose(fDadosAcessos);
         return;
     }
@@ -121,7 +313,7 @@ void buscarAcesso(int incremental_key) {
                    acesso.incremental_key, acesso.user_id, acesso.user_session, acesso.event_time, acesso.event_type);
             break;
         } else if (acesso.incremental_key > incremental_key) {
-            printf("Acesso não encontrado.\n");
+            printf("Acesso nao encontrado.\n");
             break;
         }
     }
@@ -145,18 +337,17 @@ void criarIndiceAcesso() {
     while (fread(&acesso, sizeof(DadoAcesso), 1, fDadosAcessos)) {
         count++;
 
-        // For every 100th record, store its position in the index file
         if (count % 100 == 0) {
             indice.incremental_key = acesso.incremental_key;
-            indice.file_position = ftell(fDadosAcessos) - sizeof(DadoAcesso);  // Position of the record
-            printf("Index created for key: %d at position: %ld\n", indice.incremental_key, indice.file_position);
+            indice.file_position = ftell(fDadosAcessos) - sizeof(DadoAcesso);
+            printf("Index criado para a chave: %d na posicao: %ld\n", indice.incremental_key, indice.file_position);
             fwrite(&indice, sizeof(IndiceAcesso), 1, fIndiceAcessos);
         }
     }
 
     fclose(fDadosAcessos);
     fclose(fIndiceAcessos);
-    printf("Arquivo de índice de acessos criado com sucesso.\n");
+    printf("Arquivo de indice de acessos criado com sucesso.\n");
 }
 
 int getNextIncrementalKey() {
@@ -206,14 +397,13 @@ void criarIndiceProduto() {
     printf("indice criado com sucesso.\n");
 }
 
-long buscarNoIndice(int product_id) {
+long buscarNoIndiceProduto(int product_id) {
     FILE *fIndiceProdutos = fopen(indiceProdutos, "rb");
     if (fIndiceProdutos == NULL) {
-        printf("Erro ao abrir o arquivo de índice.\n");
+        printf("Erro ao abrir o arquivo de indice.\n");
         return -1;
     }
 
-    // Determine the number of records in the index file
     fseek(fIndiceProdutos, 0, SEEK_END);
     long file_size = ftell(fIndiceProdutos);
     int num_records = file_size / sizeof(IndiceProduto);
@@ -223,22 +413,18 @@ long buscarNoIndice(int product_id) {
     int left = 0, right = num_records - 1;
     long start_position = 0;
 
-    // Binary search in the index file
     while (left <= right) {
         int mid = (left + right) / 2;
         fseek(fIndiceProdutos, mid * sizeof(IndiceProduto), SEEK_SET);
         fread(&indice, sizeof(IndiceProduto), 1, fIndiceProdutos);
 
         if (indice.product_id == product_id) {
-            // Exact match found
             start_position = indice.file_position;
             break;
         } else if (indice.product_id < product_id) {
-            // Search in the right half
-            start_position = indice.file_position;  // Save this position to search further
+            start_position = indice.file_position;
             left = mid + 1;
         } else {
-            // Search in the left half
             right = mid - 1;
         }
     }
@@ -249,39 +435,59 @@ long buscarNoIndice(int product_id) {
 
 void printDadosProdutosComIndice(int product_id) {
     FILE *fDadosProdutos = fopen(dadosProdutos, "rb");
+    FILE *fExtensionArea = fopen("extension.bin", "rb");
+
     if (fDadosProdutos == NULL) {
         printf("Erro ao abrir o arquivo de produtos.\n");
         return;
     }
 
     DadoProduto produto;
-    long pos = buscarNoIndice(product_id);
+    long pos = buscarNoIndiceProduto(product_id);
 
     if (pos == -1) {
-        printf("Produto não encontrado.\n");
+        printf("Produto nao encontrado.\n");
         fclose(fDadosProdutos);
+        if (fExtensionArea != NULL) fclose(fExtensionArea);
         return;
     }
 
-    // Seek to the position in the product file and start searching
     fseek(fDadosProdutos, pos, SEEK_SET);
+    bool found = false;
 
-    // Linear search forward to find the exact product
     while (fread(&produto, sizeof(DadoProduto), 1, fDadosProdutos)) {
-        if (produto.product_id >= product_id) {
-            if (produto.product_id == product_id) {
-                // Product found, print the details
-                printf("Product ID: %d | Category ID: %llu | Brand: %s | Price: %.2f\n",
-                       produto.product_id, produto.category_id, produto.brand, produto.price);
-            } else {
-                printf("Produto não encontrado.\n");
-            }
+        if (!produto.deleted && produto.product_id == product_id) {
+            printf("Product ID: %d | Category ID: %llu | Category Code: %s | Brand: %s | Price: %.2f\n",
+                   produto.product_id, produto.category_id, produto.category_code, produto.brand, produto.price);
+            found = true;
+            break;
+        } else if (produto.product_id > product_id) {
             break;
         }
     }
 
+    if (!found && fExtensionArea != NULL) {
+        rewind(fExtensionArea);
+
+        while (fread(&produto, sizeof(DadoProduto), 1, fExtensionArea)) {
+            if (produto.product_id == product_id) {
+                printf("Product ID: %d | Category ID: %llu | Category Code: %s | Brand: %s | Price: %.2f\n",
+                       produto.product_id, produto.category_id, produto.category_code, produto.brand, produto.price);
+                found = true;
+                break;
+            }
+        }
+
+        fclose(fExtensionArea);
+    }
+
+    if (!found) {
+        printf("Produto nao encontrado.\n");
+    }
+
     fclose(fDadosProdutos);
 }
+
 
 char *strsep(char **stringp, const char *delim) {
     char *start = *stringp;
@@ -409,16 +615,14 @@ void insertProductInOrder(DadoProduto *newProduct) {
 }
 
 void insertAcessoInOrder(DadoAcesso *newAcesso) {
-    // Get the next available incremental key
     newAcesso->incremental_key = getNextIncrementalKey();
 
-    FILE *fDadosAcessos = fopen(dadosAcesso, "ab");  // Use "ab" to append
+    FILE *fDadosAcessos = fopen(dadosAcesso, "ab");
     if (fDadosAcessos == NULL) {
         printf("Erro ao abrir o arquivo de acessos.\n");
         return;
     }
 
-    // Write the new access record with the incremental key
     fwrite(newAcesso, sizeof(DadoAcesso), 1, fDadosAcessos);
     fclose(fDadosAcessos);
 }
@@ -469,6 +673,8 @@ void criarArquivosDeDados() {
 
 void printDadosProdutos() {
     FILE *fDadosProdutos = fopen(dadosProdutos, "rb");
+    FILE *fExtensionArea = fopen("extension.bin", "rb");
+
     if (fDadosProdutos == NULL) {
         printf("Erro ao abrir o arquivo de produtos.\n");
         return;
@@ -480,15 +686,27 @@ void printDadosProdutos() {
     printf("| Product ID | Category ID | Category Code   | Brand   | Price |\n");
     printf("--------------------------------------------------------------\n");
 
-    int i =0;
     while (fread(&produto, sizeof(DadoProduto), 1, fDadosProdutos)) {
-        printf("| %d | %d | %llu | %s | %s | %f |\n",
-               i++,
-               produto.product_id,
-               produto.category_id,
-               produto.category_code,
-               produto.brand,
-               produto.price);
+        if (!produto.deleted) {
+            printf("| %d | %llu | %s | %s | %.2f |\n",
+                   produto.product_id,
+                   produto.category_id,
+                   produto.category_code,
+                   produto.brand,
+                   produto.price);
+        }
+    }
+
+    if (fExtensionArea != NULL) {
+        while (fread(&produto, sizeof(DadoProduto), 1, fExtensionArea)) {
+            printf("| %d | %llu | %s | %s | %.2f |\n",
+                   produto.product_id,
+                   produto.category_id,
+                   produto.category_code,
+                   produto.brand,
+                   produto.price);
+        }
+        fclose(fExtensionArea);
     }
 
     printf("--------------------------------------------------------------\n");
@@ -510,12 +728,14 @@ void printDadosAcessos() {
     printf("--------------------------------------------------------------------------------------\n");
 
     while (fread(&acesso, sizeof(DadoAcesso), 1, fDadosAcessos)) {
-        printf("| %d | %d | %s | %s | %s |\n",
-               acesso.incremental_key,
-               acesso.user_id,
-               acesso.user_session,
-               acesso.event_time,
-               acesso.event_type);
+        if (!acesso.deleted) {
+            printf("| %d | %d | %s | %s | %s |\n",
+                acesso.incremental_key,
+                acesso.user_id,
+                acesso.user_session,
+                acesso.event_time,
+                acesso.event_type);
+        }
     }
 
     printf("--------------------------------------------------------------------------------------\n");
@@ -523,19 +743,26 @@ void printDadosAcessos() {
     fclose(fDadosAcessos);
 }
 
+
 int main() {
     bool x = true;
 
     while (x) {
         printf("\nEscolha as opcoes:\n");
-        printf("1 - Criar os arquivos de dados\n");
-        printf("2 - Mostrar todos os dados dos produtos\n");
-        printf("3 - Mostrar todos os dados dos acessos\n");
-        printf("4 - Criar Arquivo de índice produto\n");
-        printf("5 - Procurar produto por ID\n");
-        printf("6 - Criar indice acesso\n");
-        printf("7 - Procurar indice acesso\n");
-        printf("8 - Sair\n");
+        printf("1  - Criar os arquivos de dados\n");
+        printf("2  - Mostrar todos os dados dos produtos\n");
+        printf("3  - Mostrar todos os dados dos acessos\n");
+        printf("4  - Criar Arquivo de indice produto\n");
+        printf("5  - Procurar produto por ID\n");
+        printf("6  - Criar indice acesso\n");
+        printf("7  - Procurar indice acesso\n");
+        printf("8  - Inserir produto\n");
+        printf("9  - Excluir produto\n");
+        printf("10 - Reorganizar produtos\n");
+        printf("11 - Inserir acesso\n");
+        printf("12 - Excluir acesso\n");
+        printf("13 - Reorganizar acessos\n");
+        printf("20 - Sair\n");
 
         int resposta;
         scanf("%d", &resposta);
@@ -549,9 +776,11 @@ int main() {
             case 2:
                 printDadosProdutos();
                 break;
+
             case 3:
                 printDadosAcessos();
                 break;
+
             case 4:
                 criarIndiceProduto();
                 printf("Arquivo de indices criado com sucesso.\n");
@@ -567,23 +796,94 @@ int main() {
 
             case 6:
                 criarIndiceAcesso();
-                printf("indices criados com sucesso!");
+                printf("Indices de acessos criados com sucesso.\n");
                 break;
 
-            case 7:{
+            case 7: {
                 int incremental_key;
-
-                printf("Digite o id a ser procurada: ");
+                printf("Digite o id a ser procurado: ");
                 scanf("%d", &incremental_key);
-
                 buscarAcesso(incremental_key);
                 break;
             }
 
-            case 8:
+            case 8: {
+                DadoProduto produto; 
+                produto.deleted = false;
+
+                printf("Insira o ID do produto: ");
+                scanf("%d", &produto.product_id);
+
+                printf("Insira o ID da categoria: ");
+                scanf("%llu", &produto.category_id);
+
+                printf("Insira o código da categoria: ");
+                scanf("%s", produto.category_code);
+
+                printf("Insira a marca do produto: ");
+                scanf("%s", produto.brand);
+
+                printf("Insira o preço do produto: ");
+                scanf("%f", &produto.price);
+
+                insertProductWithExtension(&produto);
+
+                printf("Produto inserido com sucesso.\n");
+                break;
+            }
+
+            case 9: {
+                int id;
+                printf("Digite o codigo id a ser removido: ");
+                scanf("%d", &id);
+                removeProduct(id);
+                break;
+            }
+
+            case 10:
+                reorganizeFile();
+                break;
+
+            case 11: { // Insert access
+                DadoAcesso acesso;
+
+                printf("Insira o ID do usuario: ");
+                scanf("%d", &acesso.user_id);
+                
+                printf("Digite a user session:");
+                scanf("%s", acesso.user_session);
+
+                printf("Insira a data do acesso: ");
+                scanf("%s", acesso.event_time);
+
+                printf("Insira o tipo do evento: ");
+                scanf("%s", &acesso.event_type);
+
+                insertAcesso(&acesso); // Function to insert access
+
+                printf("Acesso inserido com sucesso.\n");
+                break;
+            }
+
+            case 12: { // Delete access
+                int id;
+                printf("Digite o codigo id do acesso a ser removido: ");
+                scanf("%d", &id);
+                deleteAcesso(id); // Function to remove access
+                break;
+            }
+
+            case 13: { // Reorganize access file
+                reorganizeAcessoFile(); // Function to reorganize access file
+                printf("Arquivo de acessos reorganizado com sucesso.\n");
+                break;
+            }
+
+            case 20:
                 x = false;
                 printf("Encerrando o programa.\n");
                 break;
+
             default:
                 printf("Opção inválida. Tente novamente.\n");
                 break;
