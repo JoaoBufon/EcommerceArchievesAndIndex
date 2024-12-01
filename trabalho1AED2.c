@@ -4,7 +4,12 @@
 #include <stdbool.h>
 
 #define N 37
+
+#define MAX 99
+#define MIN 49
 #define KEY_FILE "incremental_key.bin"
+#define HASH_SIZE 10000
+
 
 //VARIAVEIS GLOBAIS
 char dadosProdutos [20] = "dadosDoProduto.bin";
@@ -41,6 +46,30 @@ typedef struct {
     long file_position;
 } IndiceAcesso;
 
+struct BTreeNode {
+  int product_id[MAX + 1], count;     // Armazena as chaves
+  long file_position[MAX + 1];       // Armazena os endereços do arquivo
+  struct BTreeNode *link[MAX + 1];   // Ponteiros para os filhos
+};
+struct BTreeNode *root = NULL;
+
+struct BTreeNode *createNode(int product_id, struct BTreeNode *child, long file_position) {
+  struct BTreeNode *newNode;
+  newNode = (struct BTreeNode *)malloc(sizeof(struct BTreeNode));
+  newNode->product_id[1] = product_id;
+  newNode->file_position[1] = file_position; 
+  newNode->count = 1;
+  newNode->link[0] = root;
+  newNode->link[1] = child;
+  return newNode;
+}
+
+typedef struct HashNode {
+    int incremental_key;
+    long file_position;
+    struct HashNode* next;
+} HashNode;
+HashNode* hashTable[HASH_SIZE];
 
 // Protótipos funcoes
 void parseRawLineToDadosProdutos(char *line, DadoProduto *registroProduto);
@@ -54,6 +83,236 @@ char *strsep(char **stringp, const char *delim);
 void criarIndiceProduto();
 long buscarNoIndiceProduto(int product_id);
 void printDadosProdutosComIndice(int product_id);
+
+int hashFunction(int key) {
+    return key % HASH_SIZE;
+}
+
+void initHashTable() {
+    int i;
+    for (i = 0; i < HASH_SIZE; i++) {
+        hashTable[i] = NULL;
+    }
+}
+
+void insertIntoHashTable(int incremental_key, long file_position) {
+    int hashIndex = hashFunction(incremental_key);
+    HashNode* newNode = (HashNode*)malloc(sizeof(HashNode));
+    newNode->incremental_key = incremental_key;
+    newNode->file_position = file_position;
+    newNode->next = hashTable[hashIndex];
+    hashTable[hashIndex] = newNode;
+}
+
+long searchInHashTable(int incremental_key) {
+    int hashIndex = hashFunction(incremental_key);
+    HashNode* current = hashTable[hashIndex];
+    while (current) {
+        if (current->incremental_key == incremental_key) {
+            return current->file_position;
+        }
+        current = current->next;
+    }
+    return -1; // Não encontrado
+}
+
+void freeHashTable() {
+    int i;
+    for (i = 0; i < HASH_SIZE; i++) {
+        HashNode* current = hashTable[i];
+        while (current) {
+            HashNode* temp = current;
+            current = current->next;
+            free(temp);
+        }
+        hashTable[i] = NULL;
+    }
+}
+
+void criarHashTableAcessos() {
+    printf("Criando tabela hash");
+    FILE *fDadosAcessos = fopen(dadosAcesso, "rb");
+    if (fDadosAcessos == NULL) {
+        printf("Erro ao abrir o arquivo de acessos.\n");
+        return;
+    }
+
+    initHashTable();
+    DadoAcesso acesso;
+    while (fread(&acesso, sizeof(DadoAcesso), 1, fDadosAcessos)) {
+        if (!acesso.deleted) {
+            long position = ftell(fDadosAcessos) - sizeof(DadoAcesso);
+            insertIntoHashTable(acesso.incremental_key, position);
+        }
+    }
+
+    fclose(fDadosAcessos);
+    printf("Tabela hash criada com sucesso.\n");
+}
+
+// Inserir entrada em um nó
+void insertNode(int product_id, long file_position, int pos, struct BTreeNode *node, struct BTreeNode *child) {
+  int j = node->count;
+  while (j > pos) {
+    node->product_id[j + 1] = node->product_id[j];
+    node->file_position[j + 1] = node->file_position[j];
+    node->link[j + 1] = node->link[j];
+    j--;
+  }
+  node->product_id[j + 1] = product_id;
+  node->file_position[j + 1] = file_position;
+  node->link[j + 1] = child;
+  node->count++;
+}
+
+// Dividir nó quando estiver cheio
+void splitNode(int product_id, long file_position, int *pproduct_id, long *pfile_position, int pos,
+               struct BTreeNode *node, struct BTreeNode *child, struct BTreeNode **newNode) {
+  int median, j;
+
+  if (pos > MIN)
+    median = MIN + 1;
+  else
+    median = MIN;
+
+  *newNode = (struct BTreeNode *)malloc(sizeof(struct BTreeNode));
+  j = median + 1;
+  while (j <= MAX) {
+    (*newNode)->product_id[j - median] = node->product_id[j];
+    (*newNode)->file_position[j - median] = node->file_position[j];
+    (*newNode)->link[j - median] = node->link[j];
+    j++;
+  }
+  node->count = median;
+  (*newNode)->count = MAX - median;
+
+  if (pos <= MIN) {
+    insertNode(product_id, file_position, pos, node, child);
+  } else {
+    insertNode(product_id, file_position, pos - median, *newNode, child);
+  }
+  *pproduct_id = node->product_id[node->count];
+  *pfile_position = node->file_position[node->count];
+  (*newNode)->link[0] = node->link[node->count];
+  node->count--;
+}
+
+// Inserir valor recursivamente na árvore
+int setValue(int product_id, long file_position, int *pproduct_id, long *pfile_position,
+             struct BTreeNode *node, struct BTreeNode **child) {
+  int pos;
+  if (!node) {
+    *pproduct_id = product_id;
+    *pfile_position = file_position;
+    *child = NULL;
+    return 1;
+  }
+
+  if (product_id < node->product_id[1]) {
+    pos = 0;
+  } else {
+    for (pos = node->count;
+         (product_id < node->product_id[pos] && pos > 1); pos--)
+      ;
+    if (product_id == node->product_id[pos]) {
+      printf("Chave duplicada não permitida\n");
+      return 0;
+    }
+  }
+
+  if (setValue(product_id, file_position, pproduct_id, pfile_position, node->link[pos], child)) {
+    if (node->count < MAX) {
+      insertNode(*pproduct_id, *pfile_position, pos, node, *child);
+    } else {
+      struct BTreeNode *newChild;
+      splitNode(*pproduct_id, *pfile_position, pproduct_id, pfile_position, pos, node, *child, &newChild);
+      *child = newChild;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Inserir na árvore
+void insertInBTree(int product_id, long file_position) {
+  int flag, i;
+  long file_pos;
+  struct BTreeNode *child;
+
+  flag = setValue(product_id, file_position, &i, &file_pos, root, &child);
+  if (flag)
+    root = createNode(i, child, file_pos);
+}
+
+// Buscar na árvore
+void search(int product_id, long *file_position, struct BTreeNode *myNode) {
+  if (!myNode) {
+    *file_position = -1;
+    return;
+  }
+
+  int pos;
+  if (product_id < myNode->product_id[1]) {
+    pos = 0;
+  } else {
+    for (pos = myNode->count;
+         (product_id < myNode->product_id[pos] && pos > 1); pos--)
+      ;
+    if (product_id == myNode->product_id[pos]) {
+      *file_position = myNode->file_position[pos];
+      return;
+    }
+  }
+  search(product_id, file_position, myNode->link[pos]);
+}
+
+// Percorrer a árvore
+void traversal(struct BTreeNode *myNode) {
+  int i;
+  if (myNode) {
+    for (i = 0; i < myNode->count; i++) {
+      traversal(myNode->link[i]);
+      printf("Chave: %d, Endereço: %ld\n", myNode->product_id[i + 1], myNode->file_position[i + 1]);
+    }
+    traversal(myNode->link[myNode->count]);
+  }
+}
+
+void criarBtree(){
+    printf("\nCriando B-TREE\n");
+    FILE *fDadosProdutos = fopen(dadosProdutos, "rb");
+    FILE *fExtensionArea = fopen("extension.bin", "rb");
+
+    if (fDadosProdutos == NULL) {
+        printf("Erro ao abrir o arquivo de produtos.\n");
+        return;
+    }
+
+    DadoProduto produto;
+
+    while (fread(&produto, sizeof(DadoProduto), 1, fDadosProdutos)) {
+        if (!produto.deleted) {
+            insertInBTree(produto.product_id, ftell(fDadosProdutos) - sizeof(DadoProduto));
+        }
+    }
+
+    if (fExtensionArea != NULL) {
+        while (fread(&produto, sizeof(DadoProduto), 1, fExtensionArea)) {
+            printf("| %d | %llu | %s | %s | %.2f |\n",
+                   produto.product_id,
+                   produto.category_id,
+                   produto.category_code,
+                   produto.brand,
+                   produto.price);
+        }
+        fclose(fExtensionArea);
+    }
+
+    printf("--------------------------------------------------------------\n");
+
+    fclose(fDadosProdutos);
+    printf("\nBtree criada com sucesso!\n");
+}
 
 void insertAcesso(DadoAcesso *newAcesso) {
     FILE *fDadosAcessos = fopen(dadosAcesso, "ab+");
@@ -644,7 +903,7 @@ void criarArquivosDeDados() {
 
     printf("Começou leitura e insercao dos dados\n");
 
-    while (fgets(line, sizeof(line), csv_file) && cont <= 1000) {
+    while (fgets(line, sizeof(line), csv_file)) {
         line[strcspn(line, "\n")] = 0;
         printf("Linha nmr: %d\n", cont++);
 
@@ -762,6 +1021,11 @@ int main() {
         printf("11 - Inserir acesso\n");
         printf("12 - Excluir acesso\n");
         printf("13 - Reorganizar acessos\n");
+        printf("14 - Criar B-Tree para indices de produtos\n");
+        printf("15 - Mostrar estrutura B-tree\n");
+        printf("16 - Procurar registro utilizando B-tree\n");
+        printf("17 - Criar tabela Hash para os acessos\n");
+        printf("18 - Procurar utilizando a tabela Hash\n");
         printf("20 - Sair\n");
 
         int resposta;
@@ -878,7 +1142,82 @@ int main() {
                 printf("Arquivo de acessos reorganizado com sucesso.\n");
                 break;
             }
+            
+            case 14: {
+                criarBtree();
+                break;
+            }
 
+            case 15:{
+                printf("Árvore B:\n");
+                traversal(root);
+                break;
+            }
+
+            case 16:{
+                printf("Digite o id do produto: \n");
+                int searchKey;
+                scanf("%d", &searchKey);
+                long file_position;
+                search(searchKey, &file_position, root);
+
+                if (file_position != -1) {
+                    printf("Produto encontrado: Chave: %d, Endereço: %ld\n", searchKey, file_position);
+                } else {
+                    printf("Produto não encontrado.\n");
+                }
+
+                FILE *fDadosProdutos = fopen(dadosProdutos, "rb");
+                if (fDadosProdutos == NULL) {
+                    printf("Erro ao abrir o arquivo de produtos.\n");
+                    return;
+                }
+                fseek(fDadosProdutos, file_position, SEEK_SET);
+
+                DadoProduto produto;
+                while (fread(&produto, sizeof(DadoProduto), 1, fDadosProdutos)) {
+                    if (produto.product_id == searchKey) {
+                        printf("Product ID: %d | Category ID: %llu | Category Code: %s | Brand: %s | Price: %.2f\n",
+                            produto.product_id, produto.category_id, produto.category_code, produto.brand, produto.price);
+                        break;
+                    } else {
+                        printf("Produto nao encontrado.\n");
+                        break;
+                    }
+                }
+
+                fclose(fDadosProdutos);
+                break;
+            }
+            
+            case 17:{
+                criarHashTableAcessos();
+                break;
+            }
+
+            case 18:{
+                printf("Digite a chave: ");
+                int incremental_key;
+                scanf("%d", &incremental_key);
+                long position_file = searchInHashTable(incremental_key);
+
+                FILE *fDadosAcessos = fopen(dadosAcesso, "rb");
+                DadoAcesso acesso;
+                fseek(fDadosAcessos, position_file, SEEK_SET);
+                while (fread(&acesso, sizeof(DadoAcesso), 1, fDadosAcessos)) {
+                    if (acesso.incremental_key == incremental_key) {
+                        printf("Acesso encontrado: Incremental Key: %d, User ID: %d, Session: %s, Event Time: %s, Event Type: %s\n",
+                            acesso.incremental_key, acesso.user_id, acesso.user_session, acesso.event_time, acesso.event_type);
+                        break;
+                    } else if (acesso.incremental_key > incremental_key) {
+                        printf("Acesso nao encontrado.\n");
+                        break;
+                    }
+                }
+
+                fclose(fDadosAcessos);
+                break;
+            }
             case 20:
                 x = false;
                 printf("Encerrando o programa.\n");
